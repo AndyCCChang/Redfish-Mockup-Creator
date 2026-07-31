@@ -128,13 +128,62 @@ def main():
     average_response_time = total_response_time / len( response_times )
     min_response_uri = min( response_times, key = response_times.get )
     max_response_uri = max( response_times, key = response_times.get )
+
+    # Write the full directory tree to a separate output file
+    tree_path = os.path.join( args.Dir, "TREE" )
+    try:
+        with open( tree_path, "w", encoding = "utf-8" ) as treef:
+            treef.write( "{}\n".format( os.path.basename( os.path.abspath( args.Dir ) ) ) )
+            write_tree( treef, args.Dir, prefix = "" )
+    except Exception as err:
+        print( "ERROR: Could not create TREE file in output directory: {}".format( err ) )
+
+    # Count files and folders in the output directory
+    file_count = 0
+    folder_count = 0
+    for root, dirs, files in os.walk( args.Dir ):
+        folder_count += len( dirs )
+        file_count += len( files )
+
     with open( os.path.join( args.Dir, "README" ), "a" ) as readf:
         readf.write( "Total response time: {}\n".format( total_response_time ) )
         readf.write( "Average response time: {}\n".format( average_response_time ) )
         readf.write( "Minimum response time: {}, {}\n".format( response_times[min_response_uri], min_response_uri ) )
         readf.write( "Maximum response time: {}, {}\n".format( response_times[max_response_uri], max_response_uri ) )
+        readf.write( "File count: {}\n".format( file_count ) )
+        readf.write( "Folder count: {}\n".format( folder_count ) )
+        readf.write( "Tree file: TREE\n" )
 
+    print( "File count: {}".format( file_count ) )
+    print( "Folder count: {}".format( folder_count ) )
+    print( "Tree written to: {}".format( tree_path ) )
     print( "Completed mockup creation!" )
+
+def write_tree( file_obj, directory, prefix = "" ):
+    """
+    Writes a directory tree structure to a file
+
+    Args:
+        file_obj: The open file object to write to
+        directory: The directory path to walk
+        prefix: The current line prefix for tree formatting
+    """
+
+    try:
+        entries = sorted( os.listdir( directory ), key = lambda name: ( not os.path.isdir( os.path.join( directory, name ) ), name.lower() ) )
+    except Exception:
+        return
+
+    # Exclude the TREE file itself while it is being written
+    entries = [ entry for entry in entries if not ( entry == "TREE" and os.path.isfile( os.path.join( directory, entry ) ) ) ]
+
+    for index, entry in enumerate( entries ):
+        path = os.path.join( directory, entry )
+        connector = "`-- " if index == len( entries ) - 1 else "|-- "
+        file_obj.write( "{}{}{}\n".format( prefix, connector, entry ) )
+        if os.path.isdir( path ):
+            extension = "    " if index == len( entries ) - 1 else "|   "
+            write_tree( file_obj, path, prefix + extension )
 
 def scan_resource( redfish_obj, args, response_times, uri, is_csdl = False ):
     """
