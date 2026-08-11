@@ -117,10 +117,11 @@ def main():
 
     # Scan the service
     response_times = {}
-    scan_resource( redfish_obj, args, response_times, "/redfish" )
-    scan_resource( redfish_obj, args, response_times, "/redfish/v1/odata" )
-    scan_resource( redfish_obj, args, response_times, "/redfish/v1/$metadata", is_csdl = True )
-    scan_resource( redfish_obj, args, response_times, "/redfish/v1" )
+    firmware_info = []
+    scan_resource( redfish_obj, args, response_times, firmware_info, "/redfish" )
+    scan_resource( redfish_obj, args, response_times, firmware_info, "/redfish/v1/odata" )
+    scan_resource( redfish_obj, args, response_times, firmware_info, "/redfish/v1/$metadata", is_csdl = True )
+    scan_resource( redfish_obj, args, response_times, firmware_info, "/redfish/v1" )
     redfish_obj.logout()
 
     # Add time statistics to the readme
@@ -145,6 +146,27 @@ def main():
         folder_count += len( dirs )
         file_count += len( files )
 
+    # Deduplicate and sort firmware version info for stable README output
+    unique_firmware = []
+    seen_firmware = set()
+    for entry in firmware_info:
+        key = (
+            entry.get( "Type", "" ),
+            entry.get( "Name", "" ),
+            entry.get( "Id", "" ),
+            entry.get( "Version", "" ),
+            entry.get( "URI", "" )
+        )
+        if key not in seen_firmware:
+            seen_firmware.add( key )
+            unique_firmware.append( entry )
+    unique_firmware.sort( key = lambda item: (
+        item.get( "Type", "" ).lower(),
+        item.get( "Name", "" ).lower(),
+        item.get( "Id", "" ).lower(),
+        item.get( "URI", "" ).lower()
+    ) )
+
     with open( os.path.join( args.Dir, "README" ), "a" ) as readf:
         readf.write( "Total response time: {}\n".format( total_response_time ) )
         readf.write( "Average response time: {}\n".format( average_response_time ) )
@@ -153,9 +175,30 @@ def main():
         readf.write( "File count: {}\n".format( file_count ) )
         readf.write( "Folder count: {}\n".format( folder_count ) )
         readf.write( "Tree file: TREE\n" )
+        readf.write( "Firmware version count: {}\n".format( len( unique_firmware ) ) )
+        readf.write( "Firmware versions:\n" )
+        if unique_firmware:
+            for entry in unique_firmware:
+                parts = [ entry.get( "Type", "Unknown" ) ]
+                if entry.get( "Name" ):
+                    parts.append( "Name={}".format( entry["Name"] ) )
+                if entry.get( "Id" ):
+                    parts.append( "Id={}".format( entry["Id"] ) )
+                if entry.get( "Version" ):
+                    parts.append( "Version={}".format( entry["Version"] ) )
+                if entry.get( "SoftwareId" ):
+                    parts.append( "SoftwareId={}".format( entry["SoftwareId"] ) )
+                if entry.get( "Updateable" ) is not None:
+                    parts.append( "Updateable={}".format( entry["Updateable"] ) )
+                if entry.get( "URI" ):
+                    parts.append( "URI={}".format( entry["URI"] ) )
+                readf.write( "  - {}\n".format( "; ".join( parts ) ) )
+        else:
+            readf.write( "  - None found\n" )
 
     print( "File count: {}".format( file_count ) )
     print( "Folder count: {}".format( folder_count ) )
+    print( "Firmware version count: {}".format( len( unique_firmware ) ) )
     print( "Tree written to: {}".format( tree_path ) )
     print( "Completed mockup creation!" )
 
@@ -185,7 +228,81 @@ def write_tree( file_obj, directory, prefix = "" ):
             extension = "    " if index == len( entries ) - 1 else "|   "
             write_tree( file_obj, path, prefix + extension )
 
-def scan_resource( redfish_obj, args, response_times, uri, is_csdl = False ):
+def collect_firmware_info( uri, resource_dict, firmware_info ):
+    """
+    Collects firmware and software version details from a resource payload
+
+    Args:
+        uri: The URI of the resource
+        resource_dict: The resource payload dictionary
+        firmware_info: The list used to store discovered firmware details
+    """
+
+    if not isinstance( resource_dict, dict ):
+        return
+
+    odata_type = str( resource_dict.get( "@odata.type", "" ) )
+    type_name = odata_type.split( "." )[-1] if odata_type else ""
+
+    def add_entry( entry_type, name = None, entry_id = None, version = None, software_id = None, updateable = None ):
+        if version in ( None, "" ):
+            return
+        firmware_info.append( {
+            "Type": entry_type,
+            "Name": name if name not in ( None, "" ) else None,
+            "Id": entry_id if entry_id not in ( None, "" ) else None,
+            "Version": str( version ),
+            "SoftwareId": software_id if software_id not in ( None, "" ) else None,
+            "Updateable": updateable,
+            "URI": uri
+        } )
+
+    # Software/Firmware inventory members
+    is_inventory_member = (
+        "SoftwareInventory" in odata_type
+        or ( "/FirmwareInventory/" in uri and not uri.rstrip( "/" ).endswith( "/FirmwareInventory" ) )
+        or ( "/SoftwareInventory/" in uri and not uri.rstrip( "/" ).endswith( "/SoftwareInventory" ) )
+    )
+    if is_inventory_member:
+        add_entry(
+            "SoftwareInventory",
+            name = resource_dict.get( "Name" ) or resource_dict.get( "Description" ),
+            entry_id = resource_dict.get( "Id" ),
+            version = resource_dict.get( "Version" ),
+            software_id = resource_dict.get( "SoftwareId" ),
+            updateable = resource_dict.get( "Updateable" )
+        )
+
+    # Common embedded firmware fields on managers and systems
+    if "Manager" in type_name:
+        add_entry(
+            "Manager",
+            name = resource_dict.get( "Name" ) or resource_dict.get( "ManagerType" ),
+            entry_id = resource_dict.get( "Id" ),
+            version = resource_dict.get( "FirmwareVersion" )
+        )
+
+    if "ComputerSystem" in type_name or type_name == "System":
+        add_entry(
+            "SystemBIOS",
+            name = resource_dict.get( "Name" ) or resource_dict.get( "HostName" ),
+            entry_id = resource_dict.get( "Id" ),
+            version = resource_dict.get( "BiosVersion" )
+        )
+
+    # Generic Version on inventory-like resources under UpdateService
+    if "/UpdateService/" in uri and resource_dict.get( "Version" ) not in ( None, "" ):
+        if "SoftwareInventory" not in odata_type and "Collection" not in type_name:
+            add_entry(
+                type_name or "UpdateServiceResource",
+                name = resource_dict.get( "Name" ) or resource_dict.get( "Description" ),
+                entry_id = resource_dict.get( "Id" ),
+                version = resource_dict.get( "Version" ),
+                software_id = resource_dict.get( "SoftwareId" ),
+                updateable = resource_dict.get( "Updateable" )
+            )
+
+def scan_resource( redfish_obj, args, response_times, firmware_info, uri, is_csdl = False ):
     """
     Scans a resource and saves its response
 
@@ -193,6 +310,7 @@ def scan_resource( redfish_obj, args, response_times, uri, is_csdl = False ):
         redfish_obj: The Redfish client object with an open session
         args: The command line arguments
         response_times: The response times database
+        firmware_info: The list used to store discovered firmware details
         uri: The URI to get
         is_csdl: Indicates if the resource is a CSDL file
     """
@@ -260,6 +378,9 @@ def scan_resource( redfish_obj, args, response_times, uri, is_csdl = False ):
             # needed to ensure compatibility with the system creating the mockup
             scan_dict = copy.deepcopy( save_dict )
 
+            # Collect firmware/software version details for the README summary
+            collect_firmware_info( uri, scan_dict, firmware_info )
+
             # Add the copyright statement if needed
             if args.Copyright:
                 save_dict["@Redfish.Copyright"] = args.Copyright
@@ -310,14 +431,14 @@ def scan_resource( redfish_obj, args, response_times, uri, is_csdl = False ):
     # Scan the response to see where to go next
     try:
         if is_csdl:
-            scan_csdl( redfish_obj, args, response_times, resource.text )
+            scan_csdl( redfish_obj, args, response_times, firmware_info, resource.text )
         else:
-            scan_object( redfish_obj, args, response_times, scan_dict )
+            scan_object( redfish_obj, args, response_times, firmware_info, scan_dict )
     except Exception as err:
         print( "ERROR: Could not scan '{}': {}".format( uri, err ) )
         return
 
-def scan_object( redfish_obj, args, response_times, object ):
+def scan_object( redfish_obj, args, response_times, firmware_info, object ):
     """
     Scans an object or array to find links to other resources
 
@@ -325,6 +446,7 @@ def scan_object( redfish_obj, args, response_times, object ):
         redfish_obj: The Redfish client object with an open session
         args: The command line arguments
         response_times: The response times database
+        firmware_info: The list used to store discovered firmware details
         object: The object to scan
     """
 
@@ -335,18 +457,18 @@ def scan_object( redfish_obj, args, response_times, object ):
             if item == "@odata.id" or item == "Uri" or item == "Members@odata.nextLink" or item == "@Redfish.ActionInfo":
                 if isinstance( object[item], str ):
                     if object[item].startswith( "/" ) and "#" not in object[item]:
-                        scan_resource( redfish_obj, args, response_times, object[item] )
+                        scan_resource( redfish_obj, args, response_times, firmware_info, object[item] )
 
             # If the item is an object or array, scan one level deeper
             elif isinstance( object[item], dict ) or isinstance( object[item], list ):
-                scan_object( redfish_obj, args, response_times, object[item] )
+                scan_object( redfish_obj, args, response_times, firmware_info, object[item] )
 
         # If the object is a list, see if the member needs to be scanned
         elif isinstance( object, list ):
             if isinstance( item, dict ) or isinstance( item, list ):
-                scan_object( redfish_obj, args, response_times, item )
+                scan_object( redfish_obj, args, response_times, firmware_info, item )
 
-def scan_csdl( redfish_obj, args, response_times, csdl ):
+def scan_csdl( redfish_obj, args, response_times, firmware_info, csdl ):
     """
     Scans a CSDL string to find links to other CSDL files
 
@@ -354,6 +476,7 @@ def scan_csdl( redfish_obj, args, response_times, csdl ):
         redfish_obj: The Redfish client object with an open session
         args: The command line arguments
         response_times: The response times database
+        firmware_info: The list used to store discovered firmware details
         csdl: The CSDL string to scan
     """
 
@@ -365,14 +488,14 @@ def scan_csdl( redfish_obj, args, response_times, csdl ):
     for reference in root:
         if "reference" in str( reference.tag ).lower():
             if "Reference" not in str( reference.tag ):
-                print( "Warning: Found invalid reference tag '()'; tags are case sensitive!".format( str( reference.tag ) ) )
+                print( "Warning: Found invalid reference tag '{}'; tags are case sensitive!".format( str( reference.tag ) ) )
             for tag in [ "Uri", "uri", "URI" ]:
                 uri = reference.attrib.get( tag )
                 if uri is not None:
                     if tag != "Uri":
                         print( "Warning: Found invalid Uri attribute '{}'; attributes are case sensitive!".format( tag ) )
                     # Scan the reference
-                    scan_resource( redfish_obj, args, response_times, uri, is_csdl = True )
+                    scan_resource( redfish_obj, args, response_times, firmware_info, uri, is_csdl = True )
 
 def fix_uris( payload ):
     """
